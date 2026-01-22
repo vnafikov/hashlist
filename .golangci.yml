@@ -1,0 +1,176 @@
+version: '2'
+
+linters:
+  enable:
+    - asasalint
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - decorder
+    - exptostd
+    - fatcontext
+    - gocritic
+    - gosec
+    - mirror
+    - noctx
+    - nosprintfhostport
+    - paralleltest
+    - perfsprint
+    - prealloc
+    - protogetter
+    - reassign
+    - revive
+    - tagliatelle
+    - testpackage
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+
+    staticcheck:
+      checks:
+        - all
+        - -ST1000 # Incorrect or missing package comment.
+        - -ST1020 # The documentation of an exported function should start with the function's name.
+        - -ST1021 # The documentation of an exported type should start with type's name.
+        - -ST1022 # The documentation of an exported variable or constant should start with variable's name.
+        - -QF1001 # Apply De Morgan's law.
+
+    decorder:
+      dec-order:
+        - const
+        - var
+        - type
+        - func
+      disable-dec-order-check: false
+      disable-init-func-first-check: false
+
+    fatcontext:
+      check-struct-pointers: true
+
+    gocritic:
+      # See https://go-critic.com/overview.
+      enable-all: true
+      disabled-checks:
+        - hugeParam
+        - singleCaseSwitch
+        - unnecessaryBlock
+
+    revive:
+      # See https://github.com/mgechev/revive?tab=readme-ov-file#available-rules.
+      enable-all-rules: true
+      confidence: 0
+      rules:
+        - name: add-constant
+          disabled: true
+        - name: argument-limit
+          disabled: true
+        - name: cognitive-complexity
+          disabled: true
+        - name: cyclomatic
+          disabled: true
+        - name: deep-exit
+          disabled: true
+        - name: enforce-map-style
+          arguments:
+            - make
+        - name: enforce-repeated-arg-type-style
+          arguments:
+            - short
+        - name: enforce-slice-style
+          arguments:
+            - literal
+        - name: enforce-switch-style
+          disabled: true
+        - name: exported
+          disabled: true
+        - name: flag-parameter
+          disabled: true
+        - name: function-length
+          disabled: true
+        - name: line-length-limit
+          arguments:
+            - 140
+        - name: max-public-structs
+          disabled: true
+        - name: nested-structs
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: unchecked-type-assertion
+          arguments:
+            - accept-ignored-assertion-result: true
+        - name: unhandled-error
+          arguments:
+            - strings\.Builder\.Write.*
+        - name: var-naming
+          arguments:
+            - []
+            - []
+            - - skip-package-name-checks: true
+
+    tagliatelle:
+      case:
+        rules:
+          json: camel
+          yaml: camel
+          xml: camel
+          toml: camel
+          bson: camel
+          avro: snake
+          mapstructure: camel
+          env: upperSnake
+          envconfig: upperSnake
+          whatever: snake
+        use-field-name: true
+
+  exclusions:
+    rules:
+      - linters:
+          - revive
+        text: 'unnecessary-stmt: switch with only one case can be replaced by an if-then'
+      # Local rules.
+      - path: hashlist.go
+        linters:
+          - decorder
+        text: type must not be placed after func
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+    - gci
+
+  settings:
+    gofmt:
+      rewrite-rules:
+        - pattern: interface{}
+          replacement: any
+
+    gofumpt:
+      extra-rules: true
+
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+        - alias
+        - dot
+        - blank
+      custom-order: true
