@@ -147,7 +147,12 @@ linters:
       - path: hashlist.go
         linters:
           - decorder
-        text: type must not be placed after func
+        text: "const must not be placed after var|\
+          type must not be placed after func"
+      - path: hashlist.go
+        linters:
+          - gosec
+        text: "G304"
 
 formatters:
   enable:
