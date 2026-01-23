@@ -27,6 +27,9 @@ const (
 	readerBufferSize = 256 * 1024  // 256 KiB.
 	writerBufferSize = 1024 * 1024 // 1 MiB.
 
+	printedPathLen = 70
+	cleanLine      = "\r                                                                              \r"
+
 	blake3ByteSize = 32
 
 	dateTimeLayout         = "02.01.2006 15:04:05 Z07:00"
@@ -35,7 +38,7 @@ const (
 
 var (
 	ErrMissingPath      = errors.New("missing path: please specify the root directory as the first argument")
-	ErrInvalidAlgorithm = errors.New("invalid algorithm: must be blake3 or sha256")
+	ErrInvalidAlgorithm = errors.New("invalid algorithm: must be sha256 or blake3")
 )
 
 type flags struct {
@@ -48,10 +51,10 @@ type config struct {
 }
 
 type fileRecord struct {
-	path       string
-	size       int64
-	modifiedAt string
 	hash       string
+	modifiedAt string
+	size       int64
+	path       string
 }
 
 func main() {
@@ -91,7 +94,7 @@ func configure() (config, error) {
 
 func parseFlags() flags {
 	f := flags{
-		alg: flag.String(flagAlg, "blake3", "hash algorithm: blake3, sha256"),
+		alg: flag.String(flagAlg, "sha256", "hash algorithm: sha256, blake3"),
 	}
 	usage := flag.Usage
 	flag.Usage = func() {
@@ -116,18 +119,18 @@ func parseRootPath() (string, error) {
 
 const (
 	AlgorithmInvalid Algorithm = iota
-	AlgorithmBLAKE3
 	AlgorithmSHA256
+	AlgorithmBLAKE3
 )
 
 type Algorithm uint8
 
 func (a Algorithm) String() string {
 	switch a {
-	case AlgorithmBLAKE3:
-		return "BLAKE3"
 	case AlgorithmSHA256:
 		return "SHA-256"
+	case AlgorithmBLAKE3:
+		return "BLAKE3"
 	}
 	return "invalid"
 }
@@ -136,10 +139,10 @@ func NewAlgorithm(algorithm string) (Algorithm, error) {
 	algorithm = strings.TrimSpace(algorithm)
 	algorithm = strings.ToLower(algorithm)
 	switch algorithm {
-	case "blake3":
-		return AlgorithmBLAKE3, nil
 	case "sha256":
 		return AlgorithmSHA256, nil
+	case "blake3":
+		return AlgorithmBLAKE3, nil
 	}
 	return AlgorithmInvalid, ErrInvalidAlgorithm
 }
@@ -155,10 +158,11 @@ type ManifestCreator struct {
 
 func (mc *ManifestCreator) Handle() error {
 	log.Printf(
-		`Creating hash list for:
+		`Creating %s hash list for:
 	%s
 
 `,
+		mc.algorithm,
 		mc.rootPath,
 	)
 
@@ -180,7 +184,13 @@ func (mc *ManifestCreator) createFile() error {
 		return err
 	}
 
-	log.Printf("Creating hash list in %q.", absolutePath)
+	log.Printf(
+		`Writing to:
+	%s
+
+`,
+		absolutePath,
+	)
 
 	mc.file, err = os.Create(mc.filename)
 	if err != nil {
@@ -200,12 +210,8 @@ func (mc *ManifestCreator) closeFile() error {
 		return err
 	}
 
-	absolutePath, err := filepath.Abs(mc.file.Name())
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Hash list created in %q.", absolutePath)
+	fmt.Print(cleanLine)
+	log.Println("Hash list created!")
 
 	return nil
 }
@@ -217,12 +223,23 @@ func (mc *ManifestCreator) handleEntry(path string, entry fs.DirEntry, err error
 		return nil
 	}
 	if entry.IsDir() {
+		printPath(path)
+
 		return nil
 	}
 	if !entry.Type().IsRegular() {
 		return nil
 	}
 	return mc.handleFileEntry(path)
+}
+
+func printPath(path string) {
+	r := []rune(path)
+	l := len(r)
+	if l > printedPathLen {
+		path = "…" + string(r[l-printedPathLen:])
+	}
+	fmt.Print(cleanLine + path)
 }
 
 func (mc *ManifestCreator) handleFileEntry(path string) error {
@@ -250,7 +267,7 @@ func (mc *ManifestCreator) handleFileEntry(path string) error {
 		return err
 	}
 
-	_, err = fmt.Fprintf(mc.writer, "%s\t%d\t%s\t%s\n", escapeTSV(record.path), record.size, record.modifiedAt, record.hash)
+	_, err = fmt.Fprintf(mc.writer, "%s\t%s\t%12d\t%s\n", record.hash, record.modifiedAt, record.size, escapeTSV(record.path))
 	return err
 }
 
@@ -261,9 +278,9 @@ func (mc *ManifestCreator) readFileRecord(path string, file *os.File, info fs.Fi
 	}
 
 	record := fileRecord{
-		size:       info.Size(),
-		modifiedAt: info.ModTime().Format(dateTimeLayout),
 		hash:       h,
+		modifiedAt: info.ModTime().Format(dateTimeLayout),
+		size:       info.Size(),
 	}
 	if record.path, err = filepath.Rel(mc.rootPath, path); err != nil {
 		record.path = path
@@ -274,10 +291,10 @@ func (mc *ManifestCreator) readFileRecord(path string, file *os.File, info fs.Fi
 func (mc *ManifestCreator) hashFile(file *os.File) (string, error) {
 	var h hash.Hash
 	switch mc.algorithm {
-	case AlgorithmBLAKE3:
-		h = blake3.New(blake3ByteSize, nil)
 	case AlgorithmSHA256:
 		h = sha256.New()
+	case AlgorithmBLAKE3:
+		h = blake3.New(blake3ByteSize, nil)
 	default:
 		return "", ErrInvalidAlgorithm
 	}
