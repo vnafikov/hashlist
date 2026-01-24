@@ -152,7 +152,11 @@ linters:
       - path: hashlist.go
         linters:
           - gosec
-        text: "G304"
+        text: G304
+      - path: hashlist.go
+        linters:
+          - revive
+        text: "confusing-naming: Method 'handle'"
 
 formatters:
   enable:
