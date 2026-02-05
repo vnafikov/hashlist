@@ -22,12 +22,13 @@ import (
 const (
 	exitErrorCode = 1
 
-	flagAlg     = "alg"
-	flagExtract = "extract"
+	flagAlg       = "alg"
+	flagReconcile = "reconcile"
+	flagExtract   = "extract"
 
-	readerBufferSize          = 256 * 1024      // 256 KiB.
-	writerBufferSize          = 1024 * 1024     // 1 MiB.
-	extractorReaderBufferSize = 2 * 1024 * 1024 // 2 MiB.
+	fileBufferSize   = 256 * 1024      // 256 KiB.
+	readerBufferSize = 2 * 1024 * 1024 // 2 MiB.
+	writerBufferSize = 1024 * 1024     // 1 MiB.
 
 	printedPathLen = 70
 	cleanLine      = "\r                                                                              \r"
@@ -39,8 +40,8 @@ const (
 )
 
 var (
-	ErrMissingRootPath           = errors.New("missing path: please specify the root directory as the first argument after flags")
-	ErrMissingSourceManifestPath = errors.New(
+	ErrMissingRootPath                  = errors.New("missing path: please specify the root directory as the first argument after flags")
+	ErrExtractMissingSourceManifestPath = errors.New(
 		"missing path: please specify the path to the source manifest as the first argument after flags",
 	)
 	ErrInvalidAlgorithm        = errors.New("invalid algorithm: must be sha256 or blake3")
@@ -48,16 +49,16 @@ var (
 )
 
 type flags struct {
-	alg     *string
-	extract *string
+	alg       *string
+	reconcile *string
+	extract   *string
 }
 
 type config struct {
-	rootPath  string
-	algorithm Algorithm
-
-	extractPath        string
+	rootPath           string
+	algorithm          Algorithm
 	sourceManifestPath string
+	extractPath        string
 }
 
 type fileRecord struct {
@@ -86,7 +87,7 @@ func run() error {
 		return manifestExtractor.Handle()
 	}
 
-	manifestCreator := NewManifestCreator(conf.rootPath, conf.algorithm)
+	manifestCreator := NewManifestCreator(conf.rootPath, conf.algorithm, conf.sourceManifestPath)
 	return manifestCreator.Handle()
 }
 
@@ -108,6 +109,8 @@ func configure() (config, error) {
 		if err != nil {
 			return config{}, err
 		}
+
+		sourceManifestPath = *f.reconcile
 	} else {
 		sourceManifestPath, err = parseSourceManifestPath()
 		if err != nil {
@@ -124,7 +127,13 @@ func configure() (config, error) {
 
 func parseFlags() flags {
 	f := flags{
-		alg:     flag.String(flagAlg, "sha256", "hash algorithm: sha256, blake3"),
+		alg: flag.String(flagAlg, "sha256", "hash algorithm: sha256, blake3"),
+		reconcile: flag.String(
+			flagReconcile,
+			"",
+			`adds entries for new files and deletes entries for missing files,
+does not modify existing entries or recompute hashes (relative paths must match exactly)`,
+		),
 		extract: flag.String(flagExtract, "", "extract checksums for a path from a manifest into a new one"),
 	}
 	usage := flag.Usage
@@ -132,7 +141,7 @@ func parseFlags() flags {
 		_, _ = fmt.Print(`Generates a checksum manifest for a directory tree to verify file integrity.
 
 Create a checksum manifest:
-  hashlist -alg=<algorithm> <path>
+  hashlist [-alg=<algorithm>] [-reconcile=<path to source manifest>] <path>
 
 Extract a checksum manifest for a path:
   hashlist -extract=<path> <path to source manifest>
@@ -155,7 +164,7 @@ func parseRootPath() (string, error) {
 func parseSourceManifestPath() (string, error) {
 	sourceManifestPath := flag.Arg(0)
 	if sourceManifestPath == "" {
-		return "", ErrMissingSourceManifestPath
+		return "", ErrExtractMissingSourceManifestPath
 	}
 	return sourceManifestPath, nil
 }
@@ -191,12 +200,16 @@ func NewAlgorithm(algorithm string) (Algorithm, error) {
 }
 
 type ManifestCreator struct {
-	rootPath  string
-	algorithm Algorithm
-	filename  string
-	buffer    []byte
-	file      *os.File
-	writer    *bufio.Writer
+	rootPath           string
+	algorithm          Algorithm
+	sourceManifestPath string
+	filename           string
+	buffer             []byte
+	reader             *bufio.Reader
+	readLine           string
+	readPath           string
+	isReadDone         bool
+	writer             *bufio.Writer
 }
 
 func (mc *ManifestCreator) Handle() error {
@@ -223,34 +236,83 @@ func (mc *ManifestCreator) printStart() {
 }
 
 func (mc *ManifestCreator) handle() error {
-	if err := mc.createFile(); err != nil {
+	if mc.sourceManifestPath != "" {
+		sourceFile, err := mc.openSourceFile()
+		if err != nil {
+			return err
+		}
+		defer func(file *os.File) {
+			if err := mc.closeSourceFile(file); err != nil {
+				log.Printf("ERROR: %s.", err)
+			}
+		}(sourceFile)
+	}
+
+	outputFile, err := mc.createOutputFile()
+	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := mc.closeFile(); err != nil {
+	defer func(file *os.File) {
+		if err := mc.closeOutputFile(file); err != nil {
 			log.Printf("ERROR: %s.", err)
 		}
-	}()
+	}(outputFile)
 
 	return filepath.WalkDir(mc.rootPath, mc.handleEntry)
 }
 
-func (mc *ManifestCreator) createFile() error {
-	err := mc.printFile()
-	if err != nil {
-		return err
+func (mc *ManifestCreator) openSourceFile() (*os.File, error) {
+	if err := mc.printSourceFile(); err != nil {
+		return nil, err
 	}
 
-	mc.file, err = os.Create(mc.filename)
+	sourceFile, err := os.Open(mc.sourceManifestPath)
 	if err != nil {
-		return fmt.Errorf("cannot create output file %q: %w", mc.filename, err)
+		return nil, fmt.Errorf("cannot open source file %q: %w", mc.sourceManifestPath, err)
 	}
 
-	mc.writer = bufio.NewWriterSize(mc.file, writerBufferSize)
+	mc.reader = bufio.NewReaderSize(sourceFile, readerBufferSize)
+	return sourceFile, nil
+}
+
+func (mc *ManifestCreator) printSourceFile() error {
+	absolutePath, err := filepath.Abs(mc.sourceManifestPath)
+	if err != nil {
+		return fmt.Errorf("cannot return an absolute path for %q: %w", mc.sourceManifestPath, err)
+	}
+
+	log.Printf(
+		`Source manifest:
+	%s
+
+`,
+		absolutePath,
+	)
 	return nil
 }
 
-func (mc *ManifestCreator) printFile() error {
+func (*ManifestCreator) closeSourceFile(sourceFile *os.File) error {
+	if err := sourceFile.Close(); err != nil {
+		return fmt.Errorf("cannot close source file %q: %w", sourceFile.Name(), err)
+	}
+	return nil
+}
+
+func (mc *ManifestCreator) createOutputFile() (*os.File, error) {
+	if err := mc.printOutputFile(); err != nil {
+		return nil, err
+	}
+
+	outputFile, err := os.Create(mc.filename)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create output file %q: %w", mc.filename, err)
+	}
+
+	mc.writer = bufio.NewWriterSize(outputFile, writerBufferSize)
+	return outputFile, nil
+}
+
+func (mc *ManifestCreator) printOutputFile() error {
 	absolutePath, err := filepath.Abs(mc.filename)
 	if err != nil {
 		return fmt.Errorf("cannot return an absolute path for %q: %w", mc.filename, err)
@@ -266,13 +328,13 @@ func (mc *ManifestCreator) printFile() error {
 	return nil
 }
 
-func (mc *ManifestCreator) closeFile() error {
+func (mc *ManifestCreator) closeOutputFile(outputFile *os.File) error {
 	if err := mc.writer.Flush(); err != nil {
 		return fmt.Errorf("cannot flush output writer: %w", err)
 	}
 
-	if err := mc.file.Close(); err != nil {
-		return fmt.Errorf("cannot close output file %q: %w", mc.file.Name(), err)
+	if err := outputFile.Close(); err != nil {
+		return fmt.Errorf("cannot close output file %q: %w", outputFile.Name(), err)
 	}
 	return nil
 }
@@ -304,6 +366,18 @@ func (*ManifestCreator) printPath(path string) {
 }
 
 func (mc *ManifestCreator) handleFileEntry(path string) error {
+	relPath := mc.relativePath(path)
+	normalizedPath := normalizePath(relPath)
+	if mc.reader != nil {
+		found, err := mc.handleSourceManifest(normalizedPath)
+		if err != nil {
+			return err
+		}
+		if found {
+			return nil
+		}
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		log.Printf("ERROR: cannot read file %q: %s.", path, err)
@@ -323,30 +397,114 @@ func (mc *ManifestCreator) handleFileEntry(path string) error {
 		return nil
 	}
 
-	record, err := mc.readFileRecord(path, file, info)
+	record, err := mc.readFileRecord(file, info, normalizedPath)
 	if err != nil {
 		return err
 	}
 
-	_, err = fmt.Fprintf(mc.writer, "%s\t%s\t%12d\t%s\n", record.hash, record.modifiedAt, record.size, escapeTSV(record.path))
+	_, err = fmt.Fprintf(mc.writer, "%s\t%s\t%12d\t%s\n", record.hash, record.modifiedAt, record.size, record.path)
 	return err
 }
 
-func (mc *ManifestCreator) readFileRecord(path string, file *os.File, info fs.FileInfo) (fileRecord, error) {
+func (mc *ManifestCreator) relativePath(path string) string {
+	relPath, err := filepath.Rel(mc.rootPath, path)
+	if err != nil {
+		return path
+	}
+	return relPath
+}
+
+func normalizePath(path string) string {
+	path = filepath.ToSlash(path)
+	path = escapeTSV(path)
+	return path
+}
+
+func escapeTSV(s string) string {
+	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}
+
+func (mc *ManifestCreator) handleSourceManifest(normalizedPath string) (found bool, err error) {
+	for !mc.isReadDone && mc.readPath < normalizedPath {
+		if err := mc.readNextLine(); err != nil {
+			return false, err
+		}
+	}
+	if mc.readPath != "" && mc.readPath == normalizedPath {
+		if _, err := fmt.Fprint(mc.writer, mc.readLine); err != nil {
+			return false, err
+		}
+
+		if mc.isReadDone {
+			mc.readPath = ""
+			return true, nil
+		}
+
+		if err := mc.readNextLine(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func (mc *ManifestCreator) readNextLine() error {
+	mc.readPath = ""
+	var err error
+	mc.readLine, err = mc.reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("cannot read manifest %q: %w", mc.sourceManifestPath, err)
+	}
+
+	if mc.readLine != "" {
+		mc.readPath, err = parsePath(mc.readLine)
+		if err != nil {
+			return err
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		mc.isReadDone = true
+	}
+	return nil
+}
+
+func parsePath(line string) (string, error) {
+	path, ok := afterThirdTab(line)
+	if !ok {
+		return "", ErrInvalidFileRecordFormat
+	}
+
+	path = strings.TrimSpace(path)
+	return path, nil
+}
+
+func afterThirdTab(line string) (string, bool) {
+	i := -1
+	for n := 0; n < 3; n++ {
+		j := strings.IndexByte(line[i+1:], '\t')
+		if j < 0 {
+			return "", false
+		}
+
+		i += j + 1
+	}
+	return line[i+1:], true
+}
+
+func (mc *ManifestCreator) readFileRecord(file *os.File, info fs.FileInfo, normalizedPath string) (fileRecord, error) {
 	h, err := mc.hashFile(file)
 	if err != nil {
 		return fileRecord{}, err
 	}
-
-	record := fileRecord{
+	return fileRecord{
 		hash:       h,
 		modifiedAt: info.ModTime().Format(dateTimeLayout),
 		size:       info.Size(),
-	}
-	if record.path, err = filepath.Rel(mc.rootPath, path); err != nil {
-		record.path = path
-	}
-	return record, nil
+		path:       normalizedPath,
+	}, nil
 }
 
 func (mc *ManifestCreator) hashFile(file *os.File) (string, error) {
@@ -369,25 +527,19 @@ func (mc *ManifestCreator) hashFile(file *os.File) (string, error) {
 	return hexSum, nil
 }
 
-func escapeTSV(s string) string {
-	s = strings.ReplaceAll(s, "\t", " ")
-	s = strings.ReplaceAll(s, "\r", "")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return s
-}
-
 func (*ManifestCreator) printDone() {
 	_, _ = fmt.Print(cleanLine)
 	log.Println("Hash list created!")
 }
 
-func NewManifestCreator(rootPath string, algorithm Algorithm) ManifestCreator {
+func NewManifestCreator(rootPath string, algorithm Algorithm, sourceManifestPath string) ManifestCreator {
 	rootPath = filepath.Clean(rootPath)
 	return ManifestCreator{
-		rootPath:  rootPath,
-		algorithm: algorithm,
-		filename:  filenameForCreate(rootPath, algorithm),
-		buffer:    make([]byte, readerBufferSize),
+		rootPath:           rootPath,
+		algorithm:          algorithm,
+		sourceManifestPath: sourceManifestPath,
+		filename:           filenameForCreate(rootPath, algorithm),
+		buffer:             make([]byte, fileBufferSize),
 	}
 }
 
@@ -406,9 +558,7 @@ type ManifestExtractor struct {
 	extractPath        string
 	sourceManifestPath string
 	filename           string
-	buffer             []byte
-	sourceFile         *os.File
-	outputFile         *os.File
+	reader             *bufio.Reader
 	writer             *bufio.Writer
 }
 
@@ -435,38 +585,41 @@ func (me *ManifestExtractor) printStart() {
 }
 
 func (me *ManifestExtractor) handle() error {
-	if err := me.openSourceFile(); err != nil {
+	sourceFile, err := me.openSourceFile()
+	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := me.closeSourceFile(); err != nil {
+	defer func(file *os.File) {
+		if err := me.closeSourceFile(file); err != nil {
 			log.Printf("ERROR: %s.", err)
 		}
-	}()
+	}(sourceFile)
 
-	if err := me.createOutputFile(); err != nil {
+	outputFile, err := me.createOutputFile()
+	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := me.closeOutputFile(); err != nil {
+	defer func(file *os.File) {
+		if err := me.closeOutputFile(file); err != nil {
 			log.Printf("ERROR: %s.", err)
 		}
-	}()
+	}(outputFile)
 
 	return me.extract()
 }
 
-func (me *ManifestExtractor) openSourceFile() error {
-	err := me.printSourceFile()
-	if err != nil {
-		return err
+func (me *ManifestExtractor) openSourceFile() (*os.File, error) {
+	if err := me.printSourceFile(); err != nil {
+		return nil, err
 	}
 
-	me.sourceFile, err = os.Open(me.sourceManifestPath)
+	sourceFile, err := os.Open(me.sourceManifestPath)
 	if err != nil {
-		return fmt.Errorf("cannot open source file %q: %w", me.sourceManifestPath, err)
+		return nil, fmt.Errorf("cannot open source file %q: %w", me.sourceManifestPath, err)
 	}
-	return nil
+
+	me.reader = bufio.NewReaderSize(sourceFile, readerBufferSize)
+	return sourceFile, nil
 }
 
 func (me *ManifestExtractor) printSourceFile() error {
@@ -485,26 +638,25 @@ func (me *ManifestExtractor) printSourceFile() error {
 	return nil
 }
 
-func (me *ManifestExtractor) closeSourceFile() error {
-	if err := me.sourceFile.Close(); err != nil {
-		return fmt.Errorf("cannot close source file %q: %w", me.sourceFile.Name(), err)
+func (*ManifestExtractor) closeSourceFile(sourceFile *os.File) error {
+	if err := sourceFile.Close(); err != nil {
+		return fmt.Errorf("cannot close source file %q: %w", sourceFile.Name(), err)
 	}
 	return nil
 }
 
-func (me *ManifestExtractor) createOutputFile() error {
-	err := me.printOutputFile()
-	if err != nil {
-		return err
+func (me *ManifestExtractor) createOutputFile() (*os.File, error) {
+	if err := me.printOutputFile(); err != nil {
+		return nil, err
 	}
 
-	me.outputFile, err = os.Create(me.filename)
+	outputFile, err := os.Create(me.filename)
 	if err != nil {
-		return fmt.Errorf("cannot create output file %q: %w", me.filename, err)
+		return nil, fmt.Errorf("cannot create output file %q: %w", me.filename, err)
 	}
 
-	me.writer = bufio.NewWriterSize(me.outputFile, writerBufferSize)
-	return nil
+	me.writer = bufio.NewWriterSize(outputFile, writerBufferSize)
+	return outputFile, nil
 }
 
 func (me *ManifestExtractor) printOutputFile() error {
@@ -523,13 +675,13 @@ func (me *ManifestExtractor) printOutputFile() error {
 	return nil
 }
 
-func (me *ManifestExtractor) closeOutputFile() error {
+func (me *ManifestExtractor) closeOutputFile(outputFile *os.File) error {
 	if err := me.writer.Flush(); err != nil {
 		return fmt.Errorf("cannot flush output writer: %w", err)
 	}
 
-	if err := me.outputFile.Close(); err != nil {
-		return fmt.Errorf("cannot close output file %q: %w", me.outputFile.Name(), err)
+	if err := outputFile.Close(); err != nil {
+		return fmt.Errorf("cannot close output file %q: %w", outputFile.Name(), err)
 	}
 	return nil
 }
@@ -539,17 +691,16 @@ func (me *ManifestExtractor) extract() error {
 	if me.extractPath == "." {
 		extractPath = ""
 	} else {
-		extractPath = me.extractPath
+		extractPath = normalizePath(me.extractPath)
 	}
-	reader := bufio.NewReaderSize(me.sourceFile, extractorReaderBufferSize)
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := me.reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
-			return fmt.Errorf("cannot read manifest %q: %w", me.sourceFile.Name(), err)
+			return fmt.Errorf("cannot read manifest %q: %w", me.sourceManifestPath, err)
 		}
 
 		if line != "" {
-			path, err := me.parsePath(line)
+			path, err := parsePath(line)
 			if err != nil {
 				return err
 			}
@@ -567,34 +718,11 @@ func (me *ManifestExtractor) extract() error {
 	return nil
 }
 
-func (me *ManifestExtractor) parsePath(line string) (string, error) {
-	path, ok := me.afterThirdTab(line)
-	if !ok {
-		return "", ErrInvalidFileRecordFormat
-	}
-
-	path = strings.TrimSpace(path)
-	return path, nil
-}
-
-func (*ManifestExtractor) afterThirdTab(line string) (string, bool) {
-	i := -1
-	for n := 0; n < 3; n++ {
-		j := strings.IndexByte(line[i+1:], '\t')
-		if j < 0 {
-			return "", false
-		}
-
-		i += j + 1
-	}
-	return line[i+1:], true
-}
-
 func (*ManifestExtractor) pathHasPrefix(path, prefix string) bool {
 	if prefix == "" || path == prefix {
 		return true
 	}
-	return strings.HasPrefix(path, prefix+string(os.PathSeparator))
+	return strings.HasPrefix(path, prefix+"/")
 }
 
 func (*ManifestExtractor) printDone() {
@@ -608,7 +736,6 @@ func NewManifestExtractor(extractPath, sourceManifestPath string) ManifestExtrac
 		extractPath:        extractPath,
 		sourceManifestPath: sourceManifestPath,
 		filename:           filenameForExtract(extractPath, sourceManifestPath),
-		buffer:             make([]byte, readerBufferSize),
 	}
 }
 

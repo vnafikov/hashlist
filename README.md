@@ -5,7 +5,7 @@ Generates a checksum manifest for a directory tree to verify file integrity.
 ### Usage:
 Create a checksum manifest:
 ```bash
-hashlist -alg=<algorithm: sha256, blake3> <path>
+hashlist [-alg=<algorithm: sha256, blake3>] [-reconcile=<path to source manifest>] <path>
 ```
 
 Extract a checksum manifest for a path:
