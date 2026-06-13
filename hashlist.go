@@ -358,7 +358,7 @@ func (mc *ManifestCreator) handleEntry(path string, entry fs.DirEntry, err error
 	if !entry.Type().IsRegular() {
 		return nil
 	}
-	return mc.handleFileEntry(path)
+	return mc.handleFileEntry(path, entry)
 }
 
 func (*ManifestCreator) printPath(path string) {
@@ -370,7 +370,26 @@ func (*ManifestCreator) printPath(path string) {
 	_, _ = fmt.Print(cleanLine + path)
 }
 
-func (mc *ManifestCreator) handleFileEntry(path string) error {
+func (mc *ManifestCreator) handleFileEntry(path string, entry fs.DirEntry) error {
+	info, err := entry.Info()
+	if err != nil {
+		log.Printf("ERROR: cannot read file info for %q: %s.", path, err)
+
+		return nil
+	}
+
+	relPath := mc.relativePath(path)
+	normalizedPath := normalizePath(relPath)
+	if mc.reader != nil {
+		found, err := mc.handleSourceManifest(normalizedPath, info)
+		if err != nil {
+			return err
+		}
+		if found {
+			return nil
+		}
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		log.Printf("ERROR: cannot read file %q: %s.", path, err)
@@ -382,25 +401,6 @@ func (mc *ManifestCreator) handleFileEntry(path string) error {
 			log.Printf("ERROR: cannot close file %q: %s.", path, err)
 		}
 	}()
-
-	info, err := file.Stat()
-	if err != nil {
-		log.Printf("ERROR: cannot read file info for %q: %s.", path, err)
-
-		return nil
-	}
-
-	relPath := mc.relativePath(path)
-	normalizedPath := normalizePath(relPath)
-	if mc.reader != nil {
-		found, err := mc.handleSourceManifest(info, normalizedPath)
-		if err != nil {
-			return err
-		}
-		if found {
-			return nil
-		}
-	}
 
 	record, err := mc.readFileRecord(file, info, normalizedPath)
 	if err != nil {
@@ -434,7 +434,7 @@ func escapeTSV(s string) string {
 	return s
 }
 
-func (mc *ManifestCreator) handleSourceManifest(info fs.FileInfo, normalizedPath string) (found bool, err error) {
+func (mc *ManifestCreator) handleSourceManifest(normalizedPath string, info fs.FileInfo) (found bool, err error) {
 	for !mc.isReadDone && mc.read.record.path < normalizedPath {
 		if err := mc.readNextLine(); err != nil {
 			return false, err
