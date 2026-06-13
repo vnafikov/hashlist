@@ -705,7 +705,8 @@ func (me *ManifestExtractor) extract() error {
 				return err
 			}
 
-			if me.pathHasPrefix(path, extractPath) {
+			if dirPrefix, ok := me.pathHasPrefix(path, extractPath); ok {
+				line = strings.Replace(line, dirPrefix, "", 1)
 				if _, err := fmt.Fprint(me.writer, line); err != nil {
 					return err
 				}
@@ -718,11 +719,21 @@ func (me *ManifestExtractor) extract() error {
 	return nil
 }
 
-func (*ManifestExtractor) pathHasPrefix(path, prefix string) bool {
-	if prefix == "" || path == prefix {
-		return true
+func (*ManifestExtractor) pathHasPrefix(path, prefix string) (dirPrefix string, ok bool) {
+	if prefix == "" {
+		return prefix, true
 	}
-	return strings.HasPrefix(path, prefix+"/")
+
+	if path == prefix {
+		dirPrefix = filepath.Dir(path) + "/"
+		return dirPrefix, true
+	}
+
+	dirPrefix = prefix + "/"
+	if strings.HasPrefix(path, dirPrefix) {
+		return dirPrefix, true
+	}
+	return "", false
 }
 
 func (*ManifestExtractor) printDone() {
