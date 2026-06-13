@@ -495,9 +495,13 @@ func (mc *ManifestCreator) parseLine() error {
 		hash:       parts[0],
 		modifiedAt: parts[1],
 		size:       size,
-		path:       parts[3],
+		path:       trimNewLine(parts[3]),
 	}
 	return nil
+}
+
+func trimNewLine(s string) string {
+	return strings.TrimRight(s, "\r\n")
 }
 
 func (*ManifestCreator) modifiedAt(info fs.FileInfo) string {
@@ -739,9 +743,7 @@ func (*ManifestExtractor) parsePath(line string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%w: cannot parse path: %s", ErrInvalidFileRecordFormat, line)
 	}
-
-	path = strings.TrimSpace(path)
-	return path, nil
+	return trimNewLine(path), nil
 }
 
 func afterThirdTab(line string) (string, bool) {
