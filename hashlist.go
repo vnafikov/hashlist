@@ -410,6 +410,10 @@ func (mc *ManifestCreator) handleFileEntry(path string) error {
 }
 
 func (mc *ManifestCreator) relativePath(path string) string {
+	if path == mc.rootPath {
+		return filepath.Base(path)
+	}
+
 	relPath, err := filepath.Rel(mc.rootPath, path)
 	if err != nil {
 		return path
