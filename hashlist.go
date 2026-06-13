@@ -509,6 +509,8 @@ func (*ManifestCreator) modifiedAt(info fs.FileInfo) string {
 }
 
 func (mc *ManifestCreator) readFileRecord(file *os.File, info fs.FileInfo, normalizedPath string) (fileRecord, error) {
+	mc.printPath(normalizedPath + " (hashing)")
+
 	h, err := mc.hashFile(file)
 	if err != nil {
 		return fileRecord{}, err
