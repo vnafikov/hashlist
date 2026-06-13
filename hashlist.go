@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,7 +133,7 @@ func parseFlags() flags {
 			flagReconcile,
 			"",
 			`adds entries for new files and deletes entries for missing files,
-does not modify existing entries or recompute hashes (relative paths must match exactly)`,
+does not modify existing entries or recompute hashes (relative paths, file sizes, and modification times must match exactly)`,
 		),
 		extract: flag.String(flagExtract, "", "extract checksums for a path from a manifest into a new one"),
 	}
@@ -206,10 +207,14 @@ type ManifestCreator struct {
 	filename           string
 	buffer             []byte
 	reader             *bufio.Reader
-	readLine           string
-	readPath           string
+	read               readLine
 	isReadDone         bool
 	writer             *bufio.Writer
+}
+
+type readLine struct {
+	line   string
+	record fileRecord
 }
 
 func (mc *ManifestCreator) Handle() error {
@@ -366,18 +371,6 @@ func (*ManifestCreator) printPath(path string) {
 }
 
 func (mc *ManifestCreator) handleFileEntry(path string) error {
-	relPath := mc.relativePath(path)
-	normalizedPath := normalizePath(relPath)
-	if mc.reader != nil {
-		found, err := mc.handleSourceManifest(normalizedPath)
-		if err != nil {
-			return err
-		}
-		if found {
-			return nil
-		}
-	}
-
 	file, err := os.Open(path)
 	if err != nil {
 		log.Printf("ERROR: cannot read file %q: %s.", path, err)
@@ -397,13 +390,23 @@ func (mc *ManifestCreator) handleFileEntry(path string) error {
 		return nil
 	}
 
+	relPath := mc.relativePath(path)
+	normalizedPath := normalizePath(relPath)
+	if mc.reader != nil {
+		found, err := mc.handleSourceManifest(info, normalizedPath)
+		if err != nil {
+			return err
+		}
+		if found {
+			return nil
+		}
+	}
+
 	record, err := mc.readFileRecord(file, info, normalizedPath)
 	if err != nil {
 		return err
 	}
-
-	_, err = fmt.Fprintf(mc.writer, "%s\t%s\t%12d\t%s\n", record.hash, record.modifiedAt, record.size, record.path)
-	return err
+	return mc.writeLine(record)
 }
 
 func (mc *ManifestCreator) relativePath(path string) string {
@@ -427,19 +430,19 @@ func escapeTSV(s string) string {
 	return s
 }
 
-func (mc *ManifestCreator) handleSourceManifest(normalizedPath string) (found bool, err error) {
-	for !mc.isReadDone && mc.readPath < normalizedPath {
+func (mc *ManifestCreator) handleSourceManifest(info fs.FileInfo, normalizedPath string) (found bool, err error) {
+	for !mc.isReadDone && mc.read.record.path < normalizedPath {
 		if err := mc.readNextLine(); err != nil {
 			return false, err
 		}
 	}
-	if mc.readPath != "" && mc.readPath == normalizedPath {
-		if _, err := fmt.Fprint(mc.writer, mc.readLine); err != nil {
+	if mc.read.record.path == normalizedPath && mc.read.record.size == info.Size() && mc.read.record.modifiedAt == mc.modifiedAt(info) {
+		if _, err := fmt.Fprint(mc.writer, mc.read.line); err != nil {
 			return false, err
 		}
 
 		if mc.isReadDone {
-			mc.readPath = ""
+			mc.read.record = fileRecord{}
 			return true, nil
 		}
 
@@ -452,46 +455,49 @@ func (mc *ManifestCreator) handleSourceManifest(normalizedPath string) (found bo
 }
 
 func (mc *ManifestCreator) readNextLine() error {
-	mc.readPath = ""
+	mc.read.record = fileRecord{}
 	var err error
-	mc.readLine, err = mc.reader.ReadString('\n')
+	mc.read.line, err = mc.reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("cannot read manifest %q: %w", mc.sourceManifestPath, err)
 	}
 
-	if mc.readLine != "" {
-		mc.readPath, err = parsePath(mc.readLine)
-		if err != nil {
-			return err
-		}
+	if err := mc.parseLine(); err != nil {
+		return err
 	}
+
 	if errors.Is(err, io.EOF) {
 		mc.isReadDone = true
 	}
 	return nil
 }
 
-func parsePath(line string) (string, error) {
-	path, ok := afterThirdTab(line)
-	if !ok {
-		return "", ErrInvalidFileRecordFormat
+func (mc *ManifestCreator) parseLine() error {
+	if mc.read.line == "" {
+		return nil
 	}
 
-	path = strings.TrimSpace(path)
-	return path, nil
+	parts := strings.Split(mc.read.line, "\t")
+	if len(parts) != 4 {
+		return fmt.Errorf("%w: cannot parse line: %s", ErrInvalidFileRecordFormat, mc.read.line)
+	}
+
+	size, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+	if err != nil {
+		return fmt.Errorf("%w: cannot parse size: %w: %s", ErrInvalidFileRecordFormat, err, mc.read.line)
+	}
+
+	mc.read.record = fileRecord{
+		hash:       parts[0],
+		modifiedAt: parts[1],
+		size:       size,
+		path:       parts[3],
+	}
+	return nil
 }
 
-func afterThirdTab(line string) (string, bool) {
-	i := -1
-	for n := 0; n < 3; n++ {
-		j := strings.IndexByte(line[i+1:], '\t')
-		if j < 0 {
-			return "", false
-		}
-
-		i += j + 1
-	}
-	return line[i+1:], true
+func (*ManifestCreator) modifiedAt(info fs.FileInfo) string {
+	return info.ModTime().Format(dateTimeLayout)
 }
 
 func (mc *ManifestCreator) readFileRecord(file *os.File, info fs.FileInfo, normalizedPath string) (fileRecord, error) {
@@ -501,7 +507,7 @@ func (mc *ManifestCreator) readFileRecord(file *os.File, info fs.FileInfo, norma
 	}
 	return fileRecord{
 		hash:       h,
-		modifiedAt: info.ModTime().Format(dateTimeLayout),
+		modifiedAt: mc.modifiedAt(info),
 		size:       info.Size(),
 		path:       normalizedPath,
 	}, nil
@@ -525,6 +531,11 @@ func (mc *ManifestCreator) hashFile(file *os.File) (string, error) {
 	sum := h.Sum(nil)
 	hexSum := hex.EncodeToString(sum)
 	return hexSum, nil
+}
+
+func (mc *ManifestCreator) writeLine(record fileRecord) error {
+	_, err := fmt.Fprintf(mc.writer, "%s\t%s\t%12d\t%s\n", record.hash, record.modifiedAt, record.size, record.path)
+	return err
 }
 
 func (*ManifestCreator) printDone() {
@@ -700,7 +711,7 @@ func (me *ManifestExtractor) extract() error {
 		}
 
 		if line != "" {
-			path, err := parsePath(line)
+			path, err := me.parsePath(line)
 			if err != nil {
 				return err
 			}
@@ -717,6 +728,29 @@ func (me *ManifestExtractor) extract() error {
 		}
 	}
 	return nil
+}
+
+func (*ManifestExtractor) parsePath(line string) (string, error) {
+	path, ok := afterThirdTab(line)
+	if !ok {
+		return "", fmt.Errorf("%w: cannot parse path: %s", ErrInvalidFileRecordFormat, line)
+	}
+
+	path = strings.TrimSpace(path)
+	return path, nil
+}
+
+func afterThirdTab(line string) (string, bool) {
+	i := -1
+	for n := 0; n < 3; n++ {
+		j := strings.IndexByte(line[i+1:], '\t')
+		if j < 0 {
+			return "", false
+		}
+
+		i += j + 1
+	}
+	return line[i+1:], true
 }
 
 func (*ManifestExtractor) pathHasPrefix(path, prefix string) (dirPrefix string, ok bool) {
