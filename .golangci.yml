@@ -144,6 +144,9 @@ linters:
           - revive
         text: 'unnecessary-stmt: switch with only one case can be replaced by an if-then'
       # Local rules.
+      - linters:
+          - revive
+        text: "confusing-naming: Method 'newTimes'"
       - path: hashlist.go
         linters:
           - decorder

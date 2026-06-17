@@ -18,12 +18,15 @@ import (
 	"time"
 
 	"lukechampine.com/blake3"
+
+	"github.com/vnafikov/hashlist/filesystem"
 )
 
 const (
 	exitErrorCode = 1
 
 	flagAlg       = "alg"
+	flagExtended  = "extended"
 	flagReconcile = "reconcile"
 	flagExtract   = "extract"
 
@@ -51,6 +54,7 @@ var (
 
 type flags struct {
 	alg       *string
+	extended  *bool
 	reconcile *string
 	extract   *string
 }
@@ -58,13 +62,17 @@ type flags struct {
 type config struct {
 	rootPath           string
 	algorithm          Algorithm
+	isExtended         bool
 	sourceManifestPath string
 	extractPath        string
 }
 
 type fileRecord struct {
 	hash       string
+	createdAt  string
 	modifiedAt string
+	accessedAt string
+	changedAt  string
 	size       int64
 	path       string
 }
@@ -88,7 +96,7 @@ func run() error {
 		return manifestExtractor.Handle()
 	}
 
-	manifestCreator := NewManifestCreator(conf.rootPath, conf.algorithm, conf.sourceManifestPath)
+	manifestCreator := NewManifestCreator(conf.rootPath, conf.algorithm, conf.isExtended, conf.sourceManifestPath)
 	return manifestCreator.Handle()
 }
 
@@ -121,19 +129,25 @@ func configure() (config, error) {
 	return config{
 		rootPath:           rootPath,
 		algorithm:          algorithm,
-		extractPath:        *f.extract,
+		isExtended:         *f.extended,
 		sourceManifestPath: sourceManifestPath,
+		extractPath:        *f.extract,
 	}, nil
 }
 
 func parseFlags() flags {
 	f := flags{
 		alg: flag.String(flagAlg, "sha256", "hash algorithm: sha256, blake3"),
+		extended: flag.Bool(
+			flagExtended,
+			true,
+			"include creation, access, and change times in the order: creation, modification, access, change",
+		),
 		reconcile: flag.String(
 			flagReconcile,
 			"",
 			`adds entries for new files and deletes entries for missing files,
-does not modify existing entries or recompute hashes (relative paths, file sizes, and modification times must match exactly)`,
+does not recompute hashes of existing entries (relative paths, file sizes, and modification times must match exactly)`,
 		),
 		extract: flag.String(flagExtract, "", "extract checksums for a path from a manifest into a new one"),
 	}
@@ -142,7 +156,7 @@ does not modify existing entries or recompute hashes (relative paths, file sizes
 		_, _ = fmt.Print(`Generates a checksum manifest for a directory tree to verify file integrity.
 
 Create a checksum manifest:
-  hashlist [-alg=<algorithm>] [-reconcile=<path to source manifest>] <path>
+  hashlist [-alg=<algorithm>] [-extended=false] [-reconcile=<path to source manifest>] <path>
 
 Extract a checksum manifest for a path:
   hashlist -extract=<path> <path to source manifest>
@@ -203,6 +217,7 @@ func NewAlgorithm(algorithm string) (Algorithm, error) {
 type ManifestCreator struct {
 	rootPath           string
 	algorithm          Algorithm
+	isExtended         bool
 	sourceManifestPath string
 	filename           string
 	buffer             []byte
@@ -381,7 +396,7 @@ func (mc *ManifestCreator) handleFileEntry(path string, entry fs.DirEntry) error
 	relPath := mc.relativePath(path)
 	normalizedPath := normalizePath(relPath)
 	if mc.reader != nil {
-		found, err := mc.handleSourceManifest(normalizedPath, info)
+		found, err := mc.handleSourceManifest(info, path, normalizedPath)
 		if err != nil {
 			return err
 		}
@@ -390,19 +405,7 @@ func (mc *ManifestCreator) handleFileEntry(path string, entry fs.DirEntry) error
 		}
 	}
 
-	file, err := os.Open(path)
-	if err != nil {
-		log.Printf("ERROR: cannot read file %q: %s.", path, err)
-
-		return nil
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			log.Printf("ERROR: cannot close file %q: %s.", path, err)
-		}
-	}()
-
-	record, err := mc.readFileRecord(file, info, normalizedPath)
+	record, err := mc.readFileRecordWithHash(info, path, normalizedPath)
 	if err != nil {
 		return err
 	}
@@ -434,14 +437,22 @@ func escapeTSV(s string) string {
 	return s
 }
 
-func (mc *ManifestCreator) handleSourceManifest(normalizedPath string, info fs.FileInfo) (found bool, err error) {
+func (mc *ManifestCreator) handleSourceManifest(info fs.FileInfo, path, normalizedPath string) (found bool, err error) {
 	for !mc.isReadDone && mc.read.record.path < normalizedPath {
 		if err := mc.readNextLine(); err != nil {
 			return false, err
 		}
 	}
-	if mc.read.record.path == normalizedPath && mc.read.record.size == info.Size() && mc.read.record.modifiedAt == mc.modifiedAt(info) {
-		if _, err := fmt.Fprint(mc.writer, mc.read.line); err != nil {
+	if mc.read.record.path == normalizedPath &&
+		mc.read.record.size == info.Size() &&
+		mc.read.record.modifiedAt == mc.formattedTime(info.ModTime()) {
+		record, err := mc.readFileRecord(info, path, normalizedPath)
+		if err != nil {
+			return false, err
+		}
+
+		record.hash = mc.read.record.hash
+		if err := mc.writeLine(record); err != nil {
 			return false, err
 		}
 
@@ -482,21 +493,28 @@ func (mc *ManifestCreator) parseLine() error {
 	}
 
 	parts := strings.Split(mc.read.line, "\t")
-	if len(parts) != 4 {
+	var sizeString string
+	switch len(parts) {
+	case 4:
+		mc.read.record.hash = parts[0]
+		mc.read.record.modifiedAt = parts[1]
+		sizeString = parts[2]
+		mc.read.record.path = trimNewLine(parts[3])
+	case 7:
+		mc.read.record.hash = parts[0]
+		mc.read.record.modifiedAt = parts[2]
+		sizeString = parts[5]
+		mc.read.record.path = trimNewLine(parts[6])
+	default:
 		return fmt.Errorf("%w: cannot parse line: %s", ErrInvalidFileRecordFormat, mc.read.line)
 	}
 
-	size, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+	size, err := strconv.ParseInt(strings.TrimSpace(sizeString), 10, 64)
 	if err != nil {
 		return fmt.Errorf("%w: cannot parse size: %w: %s", ErrInvalidFileRecordFormat, err, mc.read.line)
 	}
 
-	mc.read.record = fileRecord{
-		hash:       parts[0],
-		modifiedAt: parts[1],
-		size:       size,
-		path:       trimNewLine(parts[3]),
-	}
+	mc.read.record.size = size
 	return nil
 }
 
@@ -504,23 +522,79 @@ func trimNewLine(s string) string {
 	return strings.TrimRight(s, "\r\n")
 }
 
-func (*ManifestCreator) modifiedAt(info fs.FileInfo) string {
-	return info.ModTime().Format(dateTimeLayout)
+func (*ManifestCreator) formattedTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format(dateTimeLayout)
 }
 
-func (mc *ManifestCreator) readFileRecord(file *os.File, info fs.FileInfo, normalizedPath string) (fileRecord, error) {
-	mc.printPath(normalizedPath + " (hashing)")
+func (mc *ManifestCreator) readFileRecord(info fs.FileInfo, path, normalizedPath string) (fileRecord, error) {
+	record := fileRecord{
+		modifiedAt: mc.formattedTime(info.ModTime()),
+		size:       info.Size(),
+		path:       normalizedPath,
+	}
+	if mc.isExtended {
+		times, err := filesystem.NewTimes(info, path)
+		if err != nil {
+			return fileRecord{}, err
+		}
+
+		record.createdAt = mc.formattedTime(times.Creation)
+		record.accessedAt = mc.formattedTime(times.Access)
+		record.changedAt = mc.formattedTime(times.Change)
+	}
+	return record, nil
+}
+
+func (mc *ManifestCreator) writeLine(record fileRecord) error {
+	if mc.isExtended {
+		_, err := fmt.Fprintf(
+			mc.writer,
+			"%s\t%s\t%s\t%s\t%s\t%12d\t%s\n",
+			record.hash,
+			record.createdAt,
+			record.modifiedAt,
+			record.accessedAt,
+			record.changedAt,
+			record.size,
+			record.path,
+		)
+		return err
+	}
+
+	_, err := fmt.Fprintf(mc.writer, "%s\t%s\t%12d\t%s\n", record.hash, record.modifiedAt, record.size, record.path)
+	return err
+}
+
+func (mc *ManifestCreator) readFileRecordWithHash(info fs.FileInfo, path, normalizedPath string) (fileRecord, error) {
+	mc.printPath(path + " (hashing)")
+
+	record, err := mc.readFileRecord(info, path, normalizedPath)
+	if err != nil {
+		return fileRecord{}, err
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		log.Printf("ERROR: cannot read file %q: %s.", path, err)
+
+		return fileRecord{}, err
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("ERROR: cannot close file %q: %s.", path, err)
+		}
+	}()
 
 	h, err := mc.hashFile(file)
 	if err != nil {
 		return fileRecord{}, err
 	}
-	return fileRecord{
-		hash:       h,
-		modifiedAt: mc.modifiedAt(info),
-		size:       info.Size(),
-		path:       normalizedPath,
-	}, nil
+
+	record.hash = h
+	return record, nil
 }
 
 func (mc *ManifestCreator) hashFile(file *os.File) (string, error) {
@@ -543,21 +617,17 @@ func (mc *ManifestCreator) hashFile(file *os.File) (string, error) {
 	return hexSum, nil
 }
 
-func (mc *ManifestCreator) writeLine(record fileRecord) error {
-	_, err := fmt.Fprintf(mc.writer, "%s\t%s\t%12d\t%s\n", record.hash, record.modifiedAt, record.size, record.path)
-	return err
-}
-
 func (*ManifestCreator) printDone() {
 	_, _ = fmt.Print(cleanLine)
 	log.Println("Hash list created!")
 }
 
-func NewManifestCreator(rootPath string, algorithm Algorithm, sourceManifestPath string) ManifestCreator {
+func NewManifestCreator(rootPath string, algorithm Algorithm, isExtended bool, sourceManifestPath string) ManifestCreator {
 	rootPath = filepath.Clean(rootPath)
 	return ManifestCreator{
 		rootPath:           rootPath,
 		algorithm:          algorithm,
+		isExtended:         isExtended,
 		sourceManifestPath: sourceManifestPath,
 		filename:           filenameForCreate(rootPath, algorithm),
 		buffer:             make([]byte, fileBufferSize),
@@ -741,22 +811,17 @@ func (me *ManifestExtractor) extract() error {
 }
 
 func (*ManifestExtractor) parsePath(line string) (string, error) {
-	path, ok := afterThirdTab(line)
+	path, ok := afterLastTab(line)
 	if !ok {
 		return "", fmt.Errorf("%w: cannot parse path: %s", ErrInvalidFileRecordFormat, line)
 	}
 	return trimNewLine(path), nil
 }
 
-func afterThirdTab(line string) (string, bool) {
-	i := -1
-	for n := 0; n < 3; n++ {
-		j := strings.IndexByte(line[i+1:], '\t')
-		if j < 0 {
-			return "", false
-		}
-
-		i += j + 1
+func afterLastTab(line string) (string, bool) {
+	i := strings.LastIndexByte(line, '\t')
+	if i < 0 {
+		return "", false
 	}
 	return line[i+1:], true
 }
