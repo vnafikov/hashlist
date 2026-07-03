@@ -23,7 +23,7 @@ const (
 	ansiSoftRedBackground    = "\x1b[38;5;52;48;5;224m"
 	ansiSoftGreenBackground  = "\x1b[38;5;22;48;5;194m"
 	ansiSoftPurpleBackground = "\x1b[38;5;55;48;5;183m"
-	ansiSoftGrayBackground   = "\x1b[38;5;238;48;5;250m"
+	ansiGray                 = "\x1b[38;5;242m"
 
 	markAdded    = "+"
 	markDeleted  = "-"
@@ -405,7 +405,7 @@ func (*ManifestDiffer) markColor(mark string) string {
 
 func (md *ManifestDiffer) writeChangedRecord(first, second fileRecord, isExtended bool, mark string) error {
 	firstFields := md.changedRecordFields(second, first, isExtended, ansiSoftPurpleBackground, false)
-	secondFields := md.changedRecordFields(first, second, isExtended, ansiSoftGrayBackground, true)
+	secondFields := md.changedRecordFields(first, second, isExtended, ansiGray, true)
 	if _, err := fmt.Fprintln(md.writer, mark+" "+strings.Join(firstFields, "\t")); err != nil {
 		return err
 	}
