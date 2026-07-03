@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -12,7 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -271,7 +270,9 @@ func (md *ManifestDiffer) compare() error {
 	results := make([]diffResult, 0, len(added)+len(deleted)+len(modified))
 	results = append(results, md.matchMoved(deleted, added, isExtended)...)
 	results = append(results, modified...)
-	slices.SortFunc(results, md.sortResults)
+	sort.Slice(results, func(i, j int) bool {
+		return md.sortResults(results[i], results[j]) < 0
+	})
 	for i := range results {
 		if err := md.writeResult(results[i], isExtended); err != nil {
 			return err
@@ -339,9 +340,11 @@ func (*ManifestDiffer) matchMoved(deleted, added []diffLine, isExtended bool) []
 
 func (md *ManifestDiffer) sortResults(first, second diffResult) int {
 	if md.isGrouped {
-		result := cmp.Compare(first.diffType, second.diffType)
-		if result != 0 {
-			return result
+		if first.diffType < second.diffType {
+			return -1
+		}
+		if first.diffType > second.diffType {
+			return 1
 		}
 	}
 
@@ -352,7 +355,12 @@ func (md *ManifestDiffer) sortResults(first, second diffResult) int {
 		return result
 	}
 	if !md.isGrouped {
-		return cmp.Compare(first.diffType, second.diffType)
+		if first.diffType < second.diffType {
+			return -1
+		}
+		if first.diffType > second.diffType {
+			return 1
+		}
 	}
 	return 0
 }
@@ -465,7 +473,11 @@ func (*ManifestDiffer) changedSizeField(value, other int64, width int, color str
 	}
 
 	valueString := strconv.FormatInt(value, 10)
-	return strings.Repeat(" ", max(0, width-len(valueString))) + color + valueString + ansiReset
+	padding := width - len(valueString)
+	if padding < 0 {
+		padding = 0
+	}
+	return strings.Repeat(" ", padding) + color + valueString + ansiReset
 }
 
 func (md *ManifestDiffer) changedPathField(value, other, color string, changedOnly bool) string {
