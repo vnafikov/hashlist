@@ -442,28 +442,7 @@ func (*ManifestDiffer) changedTimeField(value, other, color string, changedOnly 
 		}
 		return value
 	}
-
-	valueParts := strings.Fields(value)
-	valuePartCount := len(valueParts)
-	otherParts := strings.Fields(other)
-	if valuePartCount != len(otherParts) {
-		return color + value + ansiReset
-	}
-
-	parts := make([]string, valuePartCount)
-	for i := range valueParts {
-		if valueParts[i] == otherParts[i] {
-			if changedOnly {
-				parts[i] = strings.Repeat(" ", len([]rune(valueParts[i])))
-			} else {
-				parts[i] = valueParts[i]
-			}
-			continue
-		}
-
-		parts[i] = color + valueParts[i] + ansiReset
-	}
-	return strings.Join(parts, " ")
+	return color + value + ansiReset
 }
 
 func (*ManifestDiffer) changedSizeField(value, other int64, width int, color string, changedOnly bool) string {
