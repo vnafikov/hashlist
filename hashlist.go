@@ -15,11 +15,12 @@ import (
 const (
 	exitErrorCode = 1
 
-	flagAlg       = "alg"
-	flagExtended  = "extended"
-	flagReconcile = "reconcile"
-	flagDiff      = "diff"
-	flagExtract   = "extract"
+	flagAlg         = "alg"
+	flagExtended    = "extended"
+	flagReconcile   = "reconcile"
+	flagDiff        = "diff"
+	flagDiffGrouped = "diff-grouped"
+	flagExtract     = "extract"
 
 	recordFieldCount         = 4
 	extendedRecordFieldCount = 7
@@ -49,11 +50,12 @@ var (
 )
 
 type flags struct {
-	alg       *string
-	extended  *bool
-	reconcile *string
-	diff      *bool
-	extract   *string
+	alg         *string
+	extended    *bool
+	reconcile   *string
+	diff        *bool
+	diffGrouped *bool
+	extract     *string
 }
 
 type config struct {
@@ -63,6 +65,7 @@ type config struct {
 	sourceManifestPath     string
 	diffFirstManifestPath  string
 	diffSecondManifestPath string
+	isGrouped              bool
 	extractPath            string
 }
 
@@ -96,7 +99,7 @@ func run() error {
 	}
 
 	if conf.diffFirstManifestPath != "" {
-		manifestDiffer := NewManifestDiffer(conf.diffFirstManifestPath, conf.diffSecondManifestPath)
+		manifestDiffer := NewManifestDiffer(conf.diffFirstManifestPath, conf.diffSecondManifestPath, conf.isGrouped)
 		return manifestDiffer.Handle()
 	}
 
@@ -120,7 +123,7 @@ func configure() (config, error) {
 		diffSecondManifestPath string
 	)
 	switch {
-	case *f.diff:
+	case *f.diff, *f.diffGrouped:
 		diffFirstManifestPath, diffSecondManifestPath, err = parseDiffManifestPaths()
 		if err != nil {
 			return config{}, err
@@ -150,6 +153,7 @@ func configure() (config, error) {
 		sourceManifestPath:     sourceManifestPath,
 		diffFirstManifestPath:  diffFirstManifestPath,
 		diffSecondManifestPath: diffSecondManifestPath,
+		isGrouped:              *f.diffGrouped,
 		extractPath:            *f.extract,
 	}, nil
 }
@@ -168,7 +172,12 @@ func parseFlags() flags {
 			`adds entries for new files and deletes entries for missing files,
 does not recompute hashes of existing entries (relative paths, file sizes, and modification times must match exactly)`,
 		),
-		diff:    flag.Bool(flagDiff, false, "compare two checksum manifests"),
+		diff: flag.Bool(flagDiff, false, "compare two checksum manifests"),
+		diffGrouped: flag.Bool(
+			flagDiffGrouped,
+			false,
+			"compare two checksum manifests and group diff entries in the order: added, deleted, moved, modified",
+		),
 		extract: flag.String(flagExtract, "", "extract checksums for a path from a manifest into a new one"),
 	}
 	usage := flag.Usage
@@ -179,7 +188,7 @@ Create a checksum manifest:
   hashlist [-alg=<algorithm>] [-extended=false] [-reconcile=<path to source manifest>] <path>
 
 Compare checksum manifests:
-  hashlist -diff <path to first manifest> <path to second manifest>
+  hashlist -diff[-grouped] <path to first manifest> <path to second manifest>
 
 Extract a checksum manifest for a path:
   hashlist -extract=<path> <path to source manifest>

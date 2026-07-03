@@ -27,16 +27,16 @@ const (
 
 	markAdded    = "+"
 	markDeleted  = "-"
-	markModified = "±"
 	markMoved    = "→"
+	markModified = "±"
 )
 
 const (
 	diffTypeInvalid diffType = iota
 	diffTypeAdded
 	diffTypeDeleted
-	diffTypeModified
 	diffTypeMoved
+	diffTypeModified
 )
 
 type diffType uint8
@@ -44,6 +44,7 @@ type diffType uint8
 type ManifestDiffer struct {
 	firstManifestPath  string
 	secondManifestPath string
+	isGrouped          bool
 	filename           string
 	firstReader        *bufio.Reader
 	firstHash          hash.Hash
@@ -337,13 +338,23 @@ func (*ManifestDiffer) matchMoved(deleted, added []diffLine, isExtended bool) []
 }
 
 func (md *ManifestDiffer) sortResults(first, second diffResult) int {
+	if md.isGrouped {
+		result := cmp.Compare(first.diffType, second.diffType)
+		if result != 0 {
+			return result
+		}
+	}
+
 	firstPath := md.resultPath(first)
 	secondPath := md.resultPath(second)
 	result := strings.Compare(firstPath, secondPath)
 	if result != 0 {
 		return result
 	}
-	return cmp.Compare(first.diffType, second.diffType)
+	if !md.isGrouped {
+		return cmp.Compare(first.diffType, second.diffType)
+	}
+	return 0
 }
 
 func (*ManifestDiffer) resultPath(result diffResult) string {
@@ -362,10 +373,10 @@ func (md *ManifestDiffer) writeResult(result diffResult, isExtended bool) error 
 		return md.writeRecord(result.second.record, isExtended, markAdded)
 	case diffTypeDeleted:
 		return md.writeRecord(result.first.record, isExtended, markDeleted)
-	case diffTypeModified:
-		return md.writeChangedRecord(result.first.record, result.second.record, isExtended, markModified)
 	case diffTypeMoved:
 		return md.writeChangedRecord(result.first.record, result.second.record, isExtended, markMoved)
+	case diffTypeModified:
+		return md.writeChangedRecord(result.first.record, result.second.record, isExtended, markModified)
 	}
 	return fmt.Errorf("unknown diff type: %d", result.diffType)
 }
@@ -534,19 +545,24 @@ func (*ManifestDiffer) printDone() {
 	log.Println("Hash lists compared!")
 }
 
-func NewManifestDiffer(firstManifestPath, secondManifestPath string) ManifestDiffer {
+func NewManifestDiffer(firstManifestPath, secondManifestPath string, isGrouped bool) ManifestDiffer {
 	firstManifestPath = filepath.Clean(firstManifestPath)
 	secondManifestPath = filepath.Clean(secondManifestPath)
 	return ManifestDiffer{
 		firstManifestPath:  firstManifestPath,
 		secondManifestPath: secondManifestPath,
-		filename:           filenameForDiff(),
+		isGrouped:          isGrouped,
+		filename:           filenameForDiff(isGrouped),
 	}
 }
 
-func filenameForDiff() string {
+func filenameForDiff(isGrouped bool) string {
 	createdAt := time.Now().Format(filenameDateTimeLayout)
-	return createdAt + ".diff"
+	grouped := ""
+	if isGrouped {
+		grouped = " grouped"
+	}
+	return createdAt + grouped + ".diff"
 }
 
 type diffRecordSignature struct {
