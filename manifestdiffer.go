@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	ansiReset               = "\x1b[0m"
-	ansiSoftRedBackground   = "\x1b[38;5;52;48;5;224m"
-	ansiSoftGreenBackground = "\x1b[38;5;22;48;5;194m"
+	ansiReset                = "\x1b[0m"
+	ansiSoftRedBackground    = "\x1b[38;5;52;48;5;224m"
+	ansiSoftGreenBackground  = "\x1b[38;5;22;48;5;194m"
+	ansiSoftPurpleBackground = "\x1b[38;5;55;48;5;183m"
+	ansiSoftGrayBackground   = "\x1b[38;5;238;48;5;250m"
 
 	markAdded    = "+"
 	markDeleted  = "-"
@@ -374,7 +376,7 @@ func (md *ManifestDiffer) writeRecord(record fileRecord, isExtended bool, mark s
 		"%s%s %s%s\n",
 		md.markColor(mark),
 		mark,
-		formatRecord(record, isExtended, sizeWidth*2),
+		formatRecord(record, isExtended, sizeWidth),
 		ansiReset,
 	)
 	return err
@@ -391,87 +393,119 @@ func (*ManifestDiffer) markColor(mark string) string {
 }
 
 func (md *ManifestDiffer) writeChangedRecord(first, second fileRecord, isExtended bool, mark string) error {
-	fields := make([]string, 0, extendedRecordFieldCount+1)
-	fields = append(fields, md.wordDiff(first.hash, second.hash))
-	if isExtended {
-		fields = append(
-			fields,
-			md.timeDiff(first.createdAt, second.createdAt),
-			md.timeDiff(first.modifiedAt, second.modifiedAt),
-			md.timeDiff(first.accessedAt, second.accessedAt),
-			md.timeDiff(first.changedAt, second.changedAt),
-		)
-	} else {
-		fields = append(fields, md.timeDiff(first.modifiedAt, second.modifiedAt))
+	firstFields := md.changedRecordFields(second, first, isExtended, ansiSoftPurpleBackground, false)
+	secondFields := md.changedRecordFields(first, second, isExtended, ansiSoftGrayBackground, true)
+	if _, err := fmt.Fprintln(md.writer, mark+" "+strings.Join(firstFields, "\t")); err != nil {
+		return err
 	}
-	fields = append(
-		fields,
-		md.sizeDiff(first.size, second.size, sizeWidth*2),
-		md.pathDiff(first.path, second.path),
-	)
-	_, err := fmt.Fprintln(md.writer, mark + " " + strings.Join(fields, "\t"))
+
+	_, err := fmt.Fprintln(md.writer, "  "+strings.Join(secondFields, "\t"))
 	return err
 }
 
-func (*ManifestDiffer) wordDiff(first, second string) string {
-	if first == second {
-		return first
+func (md *ManifestDiffer) changedRecordFields(record, other fileRecord, isExtended bool, color string, changedOnly bool) []string {
+	fields := make([]string, 0, extendedRecordFieldCount)
+	fields = append(fields, md.changedStringField(record.hash, other.hash, color, changedOnly))
+	if isExtended {
+		fields = append(
+			fields,
+			md.changedTimeField(record.createdAt, other.createdAt, color, changedOnly),
+			md.changedTimeField(record.modifiedAt, other.modifiedAt, color, changedOnly),
+			md.changedTimeField(record.accessedAt, other.accessedAt, color, changedOnly),
+			md.changedTimeField(record.changedAt, other.changedAt, color, changedOnly),
+		)
+	} else {
+		fields = append(fields, md.changedTimeField(record.modifiedAt, other.modifiedAt, color, changedOnly))
 	}
-	return ansiSoftRedBackground + first + ansiReset + ansiSoftGreenBackground + second + ansiReset
+	fields = append(
+		fields,
+		md.changedSizeField(record.size, other.size, sizeWidth, color, changedOnly),
+		md.changedPathField(record.path, other.path, color, changedOnly),
+	)
+	return fields
 }
 
-func (md *ManifestDiffer) timeDiff(first, second string) string {
-	if first == second {
-		return first
+func (*ManifestDiffer) changedStringField(value, other, color string, changedOnly bool) string {
+	if value == other {
+		if changedOnly {
+			return strings.Repeat(" ", len([]rune(value)))
+		}
+		return value
+	}
+	return color + value + ansiReset
+}
+
+func (*ManifestDiffer) changedTimeField(value, other, color string, changedOnly bool) string {
+	if value == other {
+		if changedOnly {
+			return strings.Repeat(" ", len([]rune(value)))
+		}
+		return value
 	}
 
-	firstParts := strings.Fields(first)
-	firstPartCount := len(firstParts)
-	secondParts := strings.Fields(second)
-	if firstPartCount != len(secondParts) {
-		return md.wordDiff(first, second)
+	valueParts := strings.Fields(value)
+	valuePartCount := len(valueParts)
+	otherParts := strings.Fields(other)
+	if valuePartCount != len(otherParts) {
+		return color + value + ansiReset
 	}
 
-	parts := make([]string, firstPartCount)
-	for i := range firstParts {
-		parts[i] = md.wordDiff(firstParts[i], secondParts[i])
+	parts := make([]string, valuePartCount)
+	for i := range valueParts {
+		if valueParts[i] == otherParts[i] {
+			if changedOnly {
+				parts[i] = strings.Repeat(" ", len([]rune(valueParts[i])))
+			} else {
+				parts[i] = valueParts[i]
+			}
+			continue
+		}
+
+		parts[i] = color + valueParts[i] + ansiReset
 	}
 	return strings.Join(parts, " ")
 }
 
-func (md *ManifestDiffer) sizeDiff(first, second int64, width int) string {
-	firstString := strconv.FormatInt(first, 10)
-	secondString := strconv.FormatInt(second, 10)
-	if firstString == secondString {
-		return fmt.Sprintf("%*s", width, firstString)
+func (*ManifestDiffer) changedSizeField(value, other int64, width int, color string, changedOnly bool) string {
+	if value == other {
+		if changedOnly {
+			return strings.Repeat(" ", width)
+		}
+		return fmt.Sprintf("%*d", width, value)
 	}
 
-	diff := md.wordDiff(firstString, secondString)
-	visibleLength := len(firstString) + len(secondString)
-	return strings.Repeat(" ", max(0, width-visibleLength)) + diff
+	valueString := strconv.FormatInt(value, 10)
+	return strings.Repeat(" ", max(0, width-len(valueString))) + color + valueString + ansiReset
 }
 
-func (md *ManifestDiffer) pathDiff(first, second string) string {
-	if first == second {
-		return first
+func (md *ManifestDiffer) changedPathField(value, other, color string, changedOnly bool) string {
+	if value == other {
+		if changedOnly {
+			return strings.Repeat(" ", len([]rune(value)))
+		}
+		return value
 	}
 
-	firstRunes := []rune(first)
-	secondRunes := []rune(second)
-	prefixLength := md.commonRunePrefixLength(firstRunes, secondRunes)
-	suffixLength := md.commonRuneSuffixLength(firstRunes[prefixLength:], secondRunes[prefixLength:])
-	firstChangedEnd := len(firstRunes) - suffixLength
-	secondChangedEnd := len(secondRunes) - suffixLength
+	valueRunes := []rune(value)
+	otherRunes := []rune(other)
+	prefixLength := md.commonRunePrefixLength(valueRunes, otherRunes)
+	suffixLength := md.commonRuneSuffixLength(valueRunes[prefixLength:], otherRunes[prefixLength:])
+	changedEnd := len(valueRunes) - suffixLength
 	var sb strings.Builder
-	sb.WriteString(string(firstRunes[:prefixLength]))
-	if prefixLength < firstChangedEnd {
-		sb.WriteString(ansiSoftRedBackground + string(firstRunes[prefixLength:firstChangedEnd]) + ansiReset)
+	if changedOnly {
+		sb.WriteString(strings.Repeat(" ", prefixLength))
+	} else {
+		sb.WriteString(string(valueRunes[:prefixLength]))
 	}
-	if prefixLength < secondChangedEnd {
-		sb.WriteString(ansiSoftGreenBackground + string(secondRunes[prefixLength:secondChangedEnd]) + ansiReset)
+	if prefixLength < changedEnd {
+		sb.WriteString(color + string(valueRunes[prefixLength:changedEnd]) + ansiReset)
 	}
 	if suffixLength > 0 {
-		sb.WriteString(string(firstRunes[firstChangedEnd:]))
+		if changedOnly {
+			sb.WriteString(strings.Repeat(" ", suffixLength))
+		} else {
+			sb.WriteString(string(valueRunes[changedEnd:]))
+		}
 	}
 	return sb.String()
 }
