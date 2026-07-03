@@ -13,5 +13,5 @@ type Times struct {
 }
 
 func NewTimes(info fs.FileInfo, path string) (Times, error) {
-	return newTimes(info, path)
+	return buildTimes(info, path)
 }

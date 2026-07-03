@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func newTimes(info fs.FileInfo, path string) (Times, error) {
+func buildTimes(info fs.FileInfo, path string) (Times, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return Times{}, syscall.EINVAL

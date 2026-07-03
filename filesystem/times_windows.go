@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func newTimes(info fs.FileInfo, _ string) (Times, error) {
+func buildTimes(info fs.FileInfo, _ string) (Times, error) {
 	stat, ok := info.Sys().(*syscall.Win32FileAttributeData)
 	if !ok {
 		return Times{}, syscall.EINVAL

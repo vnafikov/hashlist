@@ -144,20 +144,16 @@ linters:
           - revive
         text: 'unnecessary-stmt: switch with only one case can be replaced by an if-then'
       # Local rules.
-      - linters:
-          - revive
-        text: "confusing-naming: Method 'newTimes'"
-      - path: hashlist.go
+      - path: hashlist.go|manifestdiffer.go
         linters:
           - decorder
         text: "const must not be placed after var|\
           type must not be placed after func"
-      - path: hashlist.go
+      - path: manifestcreator.go
         linters:
           - gosec
         text: G304
-      - path: hashlist.go
-        linters:
+      - linters:
           - revive
         text: "confusing-naming: Method 'handle'"
 
